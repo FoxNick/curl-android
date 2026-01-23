@@ -331,7 +331,6 @@ jobs:
             --enable-static \
             --disable-shared \
             --with-openssl="$DEPS_DIR/install" \
-            --without-ssl \
             --without-libssh2 \
             --without-librtmp \
             --without-libidn2 \
