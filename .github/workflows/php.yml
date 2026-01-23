@@ -469,7 +469,6 @@ jobs:
             --without-bzip2 \
             --without-lzma \
             --without-zstd \
-            --with-sysroot="$SYSROOT" \
             CFLAGS="-Os -fPIE -fPIC" \
             AR="$AR" \
             CC="$CC" \
