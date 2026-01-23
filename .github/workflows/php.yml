@@ -115,10 +115,10 @@ jobs:
 
         cd $PHP_SOURCE_DIR
         mkdir -p build_deps
-        cd build_deps
+        #cd build_deps
     
         # 现在可以使用相对路径
-        bash ../build-deps.sh
+        bash ./build-deps.sh
         
     - name: Configure PHP
       run: |
