@@ -153,6 +153,18 @@ jobs:
         export SYSROOT="$TOOLCHAIN/sysroot"
         export PATH="$TOOLCHAIN/bin:$PATH"
         
+        # 验证编译器是否存在
+        echo "验证编译器..."
+        echo "CC: $CC"
+        ls -la "$CC" || echo "编译器不存在，检查路径..."
+        echo "TOOLCHAIN: $TOOLCHAIN"
+        echo "TARGET: $TARGET"
+        echo "CLANG_TARGET: $CLANG_TARGET"
+        
+        # 检查工具链目录结构
+        echo "检查工具链目录:"
+        ls -la "$TOOLCHAIN/bin/" | grep -E "(clang|${CLANG_TARGET})" | head -20 || true
+        
         # 1. 首先构建 openssl
         echo "================================================"
         echo "构建 OpenSSL 3.1.4"
@@ -174,13 +186,16 @@ jobs:
         # 清理之前可能的构建
         make distclean 2>/dev/null || true
         
-        # 设置 OpenSSL 构建环境
+        # 设置环境变量
         export ANDROID_NDK_ROOT="$NDK_PATH"
-        export MACHINE=${TARGET%%-*}
+        
+        echo "目标架构: $TARGET"
+        echo "OPENSSL_CONFIG: $OPENSSL_CONFIG"
+        echo "CC: $CC"
+        echo "AR: $AR"
+        echo "RANLIB: $RANLIB"
         
         echo "配置 OpenSSL 为 $OPENSSL_CONFIG..."
-        echo "目标: $TARGET"
-        echo "编译器: $CC"
         
         # 配置 OpenSSL
         ./Configure $OPENSSL_CONFIG \
@@ -190,11 +205,11 @@ jobs:
             no-dso \
             no-ui-console \
             -D__ANDROID_API__=${ANDROID_API} \
-            -static \
-            --cross-compile-prefix="$TARGET-"
+            -static
         
         echo "编译 OpenSSL..."
-        make -j$(nproc) 2>&1 | tail -20
+        # 在 make 时传递编译器变量
+        make CC="$CC" AR="$AR" RANLIB="$RANLIB" -j$(nproc) 2>&1 | tail -30
         
         echo "安装 OpenSSL..."
         make install_sw
@@ -431,6 +446,38 @@ jobs:
         
         cd ../..
         echo "✓ libzip 构建完成"
+        
+        # 7. 构建 zlib (如果需要)
+        echo "================================================"
+        echo "构建 zlib 1.2.13"
+        echo "================================================"
+        
+        if [ ! -f "zlib-1.2.13.tar.gz" ]; then
+            echo "下载 zlib..."
+            wget -q https://zlib.net/zlib-1.2.13.tar.gz
+        fi
+        
+        if [ ! -d "zlib-1.2.13" ]; then
+            echo "解压 zlib..."
+            tar -xzf zlib-1.2.13.tar.gz
+        fi
+        
+        cd zlib-1.2.13
+        
+        # 清理
+        make distclean 2>/dev/null || true
+        
+        echo "配置 zlib..."
+        CHOST="$TARGET" ./configure \
+            --prefix="$DEPS_DIR/install" \
+            --static
+        
+        echo "编译 zlib..."
+        make -j$(nproc) CC="$CC" AR="$AR" RANLIB="$RANLIB"
+        make install
+        
+        cd ..
+        echo "✓ zlib 构建完成"
         
         echo ""
         echo "================================================"
