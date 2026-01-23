@@ -3,7 +3,7 @@ name: Build PHP for Android
 on:
   push:
     tags: ['v*']
-  workflow_dispatch:  # 允许手动触发
+  workflow_dispatch:
     inputs:
       php_version:
         description: 'PHP version to build'
@@ -96,11 +96,10 @@ jobs:
         
         echo "TOOLCHAIN=$TOOLCHAIN" >> $GITHUB_ENV
         echo "TARGET=${{ matrix.target }}" >> $GITHUB_ENV
+        echo "CLANG_TARGET=${{ matrix.clang_target }}" >> $GITHUB_ENV
         echo "SYSROOT=$TOOLCHAIN/sysroot" >> $GITHUB_ENV
         echo "CFLAGS=$CFLAGS" >> $GITHUB_ENV
         echo "LDFLAGS=$LDFLAGS" >> $GITHUB_ENV
-        
-        # 导出所有编译器变量
         echo "AR=$AR" >> $GITHUB_ENV
         echo "CC=$CC" >> $GITHUB_ENV
         echo "CXX=$CXX" >> $GITHUB_ENV
@@ -110,16 +109,143 @@ jobs:
     
     - name: Build dependencies (static libraries)
       run: |
-        # 复制构建脚本到 PHP 源码目录
-        cp $GITHUB_WORKSPACE/build-deps.sh $PHP_SOURCE_DIR/
+        # 创建构建依赖脚本
+        cat > build-deps.sh << 'EOF'
+        #!/bin/bash
+        set -e
 
-        cd $PHP_SOURCE_DIR
-        mkdir -p build_deps
-        #cd build_deps
-    
-        # 现在可以使用相对路径
-        bash ./build-deps.sh
+        # 设置变量
+        SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+        DEPS_DIR="$SCRIPT_DIR/build_deps"
+        mkdir -p "$DEPS_DIR"
+        cd "$DEPS_DIR"
+
+        # 设置编译器
+        export TOOLCHAIN="$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64"
+        export AR="$TOOLCHAIN/bin/llvm-ar"
+        export CC="$TOOLCHAIN/bin/${CLANG_TARGET}-clang"
+        export CXX="$TOOLCHAIN/bin/${CLANG_TARGET}-clang++"
+        export LD="$TOOLCHAIN/bin/ld"
+        export RANLIB="$TOOLCHAIN/bin/llvm-ranlib"
+        export STRIP="$TOOLCHAIN/bin/llvm-strip"
+        export SYSROOT="$TOOLCHAIN/sysroot"
+
+        # 通用编译函数
+        build_lib() {
+            local name=$1
+            local version=$2
+            local url=$3
+            local extra_flags=$4
+            
+            echo "Building $name $version..."
+            
+            if [ ! -f "${name}-${version}.tar.gz" ]; then
+                wget -q "$url"
+            fi
+            
+            tar -xzf "${name}-${version}.tar.gz"
+            cd "${name}-${version}"
+            
+            mkdir -p build
+            cd build
+            
+            ../configure \
+                --host="${TARGET}" \
+                --prefix="$DEPS_DIR/install" \
+                --enable-static \
+                --disable-shared \
+                --disable-dependency-tracking \
+                --with-sysroot="$SYSROOT" \
+                $extra_flags \
+                CFLAGS="-Os -fPIE -fPIC" \
+                CXXFLAGS="-Os -fPIE -fPIC" \
+                AR="$AR" \
+                CC="$CC" \
+                CXX="$CXX" \
+                LD="$LD" \
+                RANLIB="$RANLIB"
+            
+            make -j$(nproc)
+            make install
+            cd ../..
+        }
+
+        # 编译 libxml2
+        build_lib "libxml2" "2.11.7" \
+            "https://download.gnome.org/sources/libxml2/2.11/libxml2-2.11.7.tar.xz" \
+            "--without-python --without-lzma"
+
+        # 编译 openssl
+        echo "Building OpenSSL..."
+        OPENSSL_VERSION="3.1.4"
+        if [ ! -f "openssl-${OPENSSL_VERSION}.tar.gz" ]; then
+            wget -q "https://www.openssl.org/source/openssl-${OPENSSL_VERSION}.tar.gz"
+        fi
+        tar -xzf "openssl-${OPENSSL_VERSION}.tar.gz"
+        cd "openssl-${OPENSSL_VERSION}"
+        ./Configure \
+            linux-generic32 \
+            --prefix="$DEPS_DIR/install" \
+            --libdir=lib \
+            no-shared \
+            no-dso \
+            no-ui-console \
+            -D__ANDROID_API__=${ANDROID_API} \
+            --cross-compile-prefix="${TARGET}-"
+        make -j$(nproc)
+        make install_sw
+        cd ..
+
+        # 编译 curl
+        build_lib "curl" "8.5.0" \
+            "https://curl.se/download/curl-8.5.0.tar.gz" \
+            "--with-openssl=$DEPS_DIR/install --without-ssl --without-libssh2 --without-librtmp --without-libidn2 --without-brotli --without-zstd"
+
+        # 编译 sqlite
+        SQLITE_VERSION="3440000"
+        echo "Building SQLite..."
+        if [ ! -f "sqlite-autoconf-${SQLITE_VERSION}.tar.gz" ]; then
+            wget -q "https://www.sqlite.org/2024/sqlite-autoconf-${SQLITE_VERSION}.tar.gz"
+        fi
+        tar -xzf "sqlite-autoconf-${SQLITE_VERSION}.tar.gz"
+        cd "sqlite-autoconf-${SQLITE_VERSION}"
+        mkdir -p build
+        cd build
+        ../configure \
+            --host="${TARGET}" \
+            --prefix="$DEPS_DIR/install" \
+            --enable-static \
+            --disable-shared \
+            --disable-readline \
+            CFLAGS="-Os -fPIE -fPIC -DSQLITE_ENABLE_COLUMN_METADATA -DSQLITE_ENABLE_FTS3 -DSQLITE_ENABLE_FTS4 -DSQLITE_ENABLE_FTS5 -DSQLITE_ENABLE_JSON1 -DSQLITE_ENABLE_RTREE -DSQLITE_MAX_VARIABLE_NUMBER=250000" \
+            AR="$AR" \
+            CC="$CC" \
+            LD="$LD"
+        make -j$(nproc)
+        make install
+        cd ../..
+
+        # 编译 oniguruma (mbstring依赖)
+        build_lib "onig" "6.9.9" \
+            "https://github.com/kkos/oniguruma/releases/download/v6.9.9/onig-6.9.9.tar.gz" \
+            ""
+
+        # 编译 libzip
+        build_lib "libzip" "1.10.1" \
+            "https://libzip.org/download/libzip-1.10.1.tar.gz" \
+            "--without-bzip2 --without-lzma --without-zstd"
+
+        echo "Dependencies built successfully!"
+        EOF
+
+        # 赋予执行权限并运行
+        chmod +x build-deps.sh
+        ./build-deps.sh
         
+        # 设置环境变量供后续步骤使用
+        echo "DEPS_DIR=$(pwd)/build_deps" >> $GITHUB_ENV
+        echo "DEPS_INSTALL_DIR=$(pwd)/build_deps/install" >> $GITHUB_ENV
+    
     - name: Configure PHP
       run: |
         cd $PHP_SOURCE_DIR
@@ -128,7 +254,7 @@ jobs:
         make distclean 2>/dev/null || true
         ./configure --clean 2>/dev/null || true
         
-        # 配置PHP
+        # 配置PHP，使用编译好的依赖库
         ./buildconf --force
         
         ./configure \
@@ -155,15 +281,15 @@ jobs:
           --enable-xml \
           --enable-xmlreader \
           --enable-xmlwriter \
-          --with-curl \
+          --with-curl=$DEPS_INSTALL_DIR \
           --with-libedit \
-          --with-openssl \
+          --with-openssl=$DEPS_INSTALL_DIR \
           --with-zlib \
-          --with-zip \
+          --with-zip=$DEPS_INSTALL_DIR \
           --with-mysqli=mysqlnd \
           --with-pdo-mysql=mysqlnd \
-          --with-pdo-sqlite \
-          --with-sqlite3 \
+          --with-pdo-sqlite=$DEPS_INSTALL_DIR \
+          --with-sqlite3=$DEPS_INSTALL_DIR \
           --with-iconv \
           --with-gmp \
           --with-xsl \
@@ -183,8 +309,8 @@ jobs:
           --enable-sysvshm \
           --with-config-file-path=/data/local/tmp/php \
           --with-config-file-scan-dir=/data/local/tmp/php/conf.d \
-          CFLAGS="$CFLAGS" \
-          LDFLAGS="$LDFLAGS" \
+          CFLAGS="$CFLAGS -I$DEPS_INSTALL_DIR/include" \
+          LDFLAGS="$LDFLAGS -L$DEPS_INSTALL_DIR/lib" \
           AR="$AR" \
           CC="$CC" \
           CXX="$CXX" \
