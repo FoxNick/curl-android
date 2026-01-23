@@ -354,20 +354,20 @@ jobs:
         
         # 4. 构建 sqlite
         echo "================================================"
-        echo "构建 SQLite 3440000"
+        echo "构建 SQLite 3510200"
         echo "================================================"
         
-        if [ ! -f "sqlite-autoconf-3440000.tar.gz" ]; then
+        if [ ! -f "sqlite-autoconf-3510200.tar.gz" ]; then
             echo "下载 SQLite..."
-            wget -q https://www.sqlite.org/2024/sqlite-autoconf-3440000.tar.gz
+            wget -q https://www.sqlite.org/2026/sqlite-autoconf-3510200.tar.gz
         fi
         
-        if [ ! -d "sqlite-autoconf-3440000" ]; then
+        if [ ! -d "sqlite-autoconf-3510200" ]; then
             echo "解压 SQLite..."
-            tar -xzf sqlite-autoconf-3440000.tar.gz
+            tar -xzf sqlite-autoconf-3510200.tar.gz
         fi
         
-        cd sqlite-autoconf-3440000
+        cd sqlite-autoconf-3510200
         
         # 清理
         make distclean 2>/dev/null || true
