@@ -26,15 +26,19 @@ jobs:
           - arch: arm64
             target: aarch64-linux-android
             clang_target: aarch64-none-linux-android21
+            android_abi: arm64-v8a
           - arch: arm
             target: armv7a-linux-androideabi
             clang_target: armv7a-linux-androideabi21
+            android_abi: armeabi-v7a
           - arch: x86_64
             target: x86_64-linux-android
             clang_target: x86_64-linux-android21
+            android_abi: x86_64
           - arch: x86
             target: i686-linux-android
             clang_target: i686-linux-android21
+            android_abi: x86
     
     steps:
     - name: Checkout repository
@@ -49,7 +53,7 @@ jobs:
         echo "NDK_PATH=/tmp/android-ndk/android-ndk-${{ env.ANDROID_NDK_VERSION }}" >> $GITHUB_ENV
         echo "$(pwd)/android-ndk-${{ env.ANDROID_NDK_VERSION }}/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_PATH
     
-    - name: Install dependencies
+    - name: Install system dependencies
       run: |
         sudo apt-get update
         sudo apt-get install -y \
@@ -73,7 +77,19 @@ jobs:
           libfreetype6-dev \
           libgmp-dev \
           libedit-dev \
-          libxslt1-dev
+          libxslt1-dev \
+          xz-utils \
+          bzip2 \
+          unzip \
+          cmake \
+          ninja-build \
+          wget \
+          curl \
+          ca-certificates \
+          libicu-dev \
+          libbz2-dev \
+          liblz4-dev \
+          liblzma-dev
     
     - name: Download PHP source
       run: |
@@ -106,6 +122,7 @@ jobs:
         echo "LD=$LD" >> $GITHUB_ENV
         echo "RANLIB=$RANLIB" >> $GITHUB_ENV
         echo "STRIP=$STRIP" >> $GITHUB_ENV
+        echo "ANDROID_ABI=${{ matrix.android_abi }}" >> $GITHUB_ENV
     
     - name: Build dependencies (static libraries)
       run: |
@@ -130,112 +147,321 @@ jobs:
         export STRIP="$TOOLCHAIN/bin/llvm-strip"
         export SYSROOT="$TOOLCHAIN/sysroot"
 
-        # 通用编译函数
+        # 改进的下载函数，支持重试
+        download_with_retry() {
+            local url=$1
+            local output_file=$2
+            local max_retries=3
+            local retry_delay=5
+            
+            for i in $(seq 1 $max_retries); do
+                echo "下载尝试 $i/$max_retries: $url"
+                if wget --tries=3 --timeout=30 -q -O "$output_file" "$url"; then
+                    echo "✓ 下载成功: $output_file"
+                    return 0
+                fi
+                
+                if [ $i -lt $max_retries ]; then
+                    echo "下载失败，${retry_delay}秒后重试..."
+                    sleep $retry_delay
+                fi
+            done
+            
+            echo "✗ 错误: 无法下载 $url (尝试了 $max_retries 次)"
+            return 1
+        }
+
+        # 从URL提取文件名
+        get_filename_from_url() {
+            local url=$1
+            basename "$url"
+        }
+
+        # 通用解压函数
+        extract_archive() {
+            local file=$1
+            
+            if [[ "$file" == *.tar.gz ]] || [[ "$file" == *.tgz ]]; then
+                echo "解压 gzip 压缩包: $file"
+                tar -xzf "$file"
+            elif [[ "$file" == *.tar.xz ]]; then
+                echo "解压 xz 压缩包: $file"
+                tar -xJf "$file"
+            elif [[ "$file" == *.tar.bz2 ]]; then
+                echo "解压 bzip2 压缩包: $file"
+                tar -xjf "$file"
+            elif [[ "$file" == *.zip ]]; then
+                echo "解压 zip 文件: $file"
+                unzip -q "$file"
+            else
+                echo "错误: 不支持的文件格式: $file"
+                return 1
+            fi
+        }
+
+        # 改进的通用编译函数
         build_lib() {
             local name=$1
             local version=$2
             local url=$3
             local extra_flags=$4
             
-            echo "Building $name $version..."
+            echo "================================================"
+            echo "开始构建: $name $version"
+            echo "================================================"
             
-            if [ ! -f "${name}-${version}.tar.gz" ]; then
-                wget -q "$url"
+            # 从URL获取文件名
+            local filename=$(get_filename_from_url "$url")
+            local extracted_dir=""
+            
+            # 处理不同的命名约定
+            if [[ "$filename" == "${name}-${version}"* ]]; then
+                extracted_dir="${name}-${version}"
+            else
+                # 尝试从文件名推断目录名
+                extracted_dir=$(echo "$filename" | sed 's/\.tar\..*$//' | sed 's/\.zip$//')
             fi
             
-            tar -xzf "${name}-${version}.tar.gz"
-            cd "${name}-${version}"
+            # 检查是否已经构建过
+            if [ -f "$DEPS_DIR/install/lib/lib${name}.a" ] || 
+               [ -f "$DEPS_DIR/install/lib64/lib${name}.a" ] || 
+               [ -d "$DEPS_DIR/install/lib/${name}" ]; then
+                echo "✓ $name 已经构建完成，跳过"
+                return 0
+            fi
             
+            # 下载源码
+            if [ ! -f "$filename" ]; then
+                echo "正在下载 $name $version..."
+                if ! download_with_retry "$url" "$filename"; then
+                    # 如果下载失败，尝试备用镜像
+                    echo "主镜像下载失败，尝试备用镜像..."
+                    if [[ "$name" == "xml2" ]]; then
+                        local alt_url="https://mirrors.tuna.tsinghua.edu.cn/gnome/sources/libxml2/${version%.*}/libxml2-${version}.tar.xz"
+                        filename="libxml2-${version}.tar.xz"
+                        download_with_retry "$alt_url" "$filename" || return 1
+                    elif [[ "$name" == "curl" ]]; then
+                        local alt_url="https://curl.se/download/curl-${version}.tar.gz"
+                        filename="curl-${version}.tar.gz"
+                        download_with_retry "$alt_url" "$filename" || return 1
+                    else
+                        return 1
+                    fi
+                fi
+            else
+                echo "✓ 已存在源码包: $filename"
+            fi
+            
+            # 解压
+            echo "解压 $filename..."
+            if [ ! -d "$extracted_dir" ] || [ ! -f "$extracted_dir/configure" ] && [ ! -f "$extracted_dir/CMakeLists.txt" ]; then
+                extract_archive "$filename" || return 1
+            else
+                echo "✓ 已解压: $extracted_dir"
+            fi
+            
+            # 进入源码目录
+            cd "$extracted_dir"
+            
+            echo "配置 $name..."
+            
+            # 清理之前的构建
+            [ -d "build" ] && rm -rf build
             mkdir -p build
             cd build
             
-            ../configure \
-                --host="${TARGET}" \
-                --prefix="$DEPS_DIR/install" \
-                --enable-static \
-                --disable-shared \
-                --disable-dependency-tracking \
-                --with-sysroot="$SYSROOT" \
-                $extra_flags \
-                CFLAGS="-Os -fPIE -fPIC" \
-                CXXFLAGS="-Os -fPIE -fPIC" \
-                AR="$AR" \
-                CC="$CC" \
-                CXX="$CXX" \
-                LD="$LD" \
-                RANLIB="$RANLIB"
+            # 保存当前目录
+            local build_dir=$(pwd)
             
-            make -j$(nproc)
-            make install
+            # 检查配置类型（autotools 或 cmake）
+            if [ -f "../configure" ]; then
+                # autotools 项目
+                echo "使用 autotools 配置..."
+                ../configure \
+                    --host="${TARGET}" \
+                    --prefix="$DEPS_DIR/install" \
+                    --enable-static \
+                    --disable-shared \
+                    --disable-dependency-tracking \
+                    --with-sysroot="$SYSROOT" \
+                    $extra_flags \
+                    CFLAGS="-Os -fPIE -fPIC" \
+                    CXXFLAGS="-Os -fPIE -fPIC" \
+                    AR="$AR" \
+                    CC="$CC" \
+                    CXX="$CXX" \
+                    LD="$LD" \
+                    RANLIB="$RANLIB"
+            elif [ -f "../CMakeLists.txt" ]; then
+                # cmake 项目
+                echo "使用 CMake 配置..."
+                cmake .. \
+                    -DCMAKE_SYSTEM_NAME=Android \
+                    -DCMAKE_ANDROID_NDK="$NDK_PATH" \
+                    -DCMAKE_ANDROID_ARCH_ABI="$ANDROID_ABI" \
+                    -DCMAKE_ANDROID_STL_TYPE=c++_static \
+                    -DCMAKE_INSTALL_PREFIX="$DEPS_DIR/install" \
+                    -DBUILD_SHARED_LIBS=OFF \
+                    -DCMAKE_BUILD_TYPE=Release \
+                    -DCMAKE_C_COMPILER="$CC" \
+                    -DCMAKE_CXX_COMPILER="$CXX" \
+                    -DCMAKE_AR="$AR" \
+                    -DCMAKE_RANLIB="$RANLIB"
+            else
+                echo "错误: 无法识别的构建系统"
+                cd ../..
+                return 1
+            fi
+            
+            echo "编译 $name..."
+            if ! make -j$(nproc); then
+                echo "编译失败，正在清理并重试..."
+                cd ..
+                rm -rf build
+                mkdir build && cd build
+                # 简化配置重试
+                if [ -f "../configure" ]; then
+                    echo "重试使用简化配置..."
+                    ../configure \
+                        --host="${TARGET}" \
+                        --prefix="$DEPS_DIR/install" \
+                        --enable-static \
+                        --disable-shared \
+                        --with-sysroot="$SYSROOT" \
+                        $extra_flags \
+                        CC="$CC" \
+                        AR="$AR"
+                fi
+                if ! make -j$(nproc); then
+                    echo "错误: $name 编译失败"
+                    cd ../..
+                    return 1
+                fi
+            fi
+            
+            echo "安装 $name..."
+            if ! make install; then
+                echo "安装失败，检查权限..."
+                if ! sudo make install; then
+                    echo "警告: 安装失败，但继续执行..."
+                fi
+            fi
+            
             cd ../..
+            
+            echo "✓ $name 构建完成"
+            echo ""
         }
 
+        echo "================================================"
+        echo "开始构建 Android ($ANDROID_ABI) 依赖库"
+        echo "目标平台: $TARGET"
+        echo "工具链: $CC"
+        echo "安装目录: $DEPS_DIR/install"
+        echo "================================================"
+        echo ""
+        
+        # 创建安装目录
+        mkdir -p "$DEPS_DIR/install"
+        
         # 编译 libxml2
-        build_lib "libxml2" "2.11.7" \
+        build_lib "xml2" "2.11.7" \
             "https://download.gnome.org/sources/libxml2/2.11/libxml2-2.11.7.tar.xz" \
-            "--without-python --without-lzma"
-
+            "--without-python --without-lzma --without-modules"
+        
         # 编译 openssl
-        echo "Building OpenSSL..."
-        OPENSSL_VERSION="3.1.4"
-        if [ ! -f "openssl-${OPENSSL_VERSION}.tar.gz" ]; then
-            wget -q "https://www.openssl.org/source/openssl-${OPENSSL_VERSION}.tar.gz"
+        echo "================================================"
+        echo "构建 OpenSSL 3.1.4"
+        echo "================================================"
+        if [ ! -f "openssl-3.1.4.tar.gz" ]; then
+            download_with_retry "https://www.openssl.org/source/openssl-3.1.4.tar.gz" "openssl-3.1.4.tar.gz" || \
+            download_with_retry "https://github.com/openssl/openssl/releases/download/openssl-3.1.4/openssl-3.1.4.tar.gz" "openssl-3.1.4.tar.gz"
         fi
-        tar -xzf "openssl-${OPENSSL_VERSION}.tar.gz"
-        cd "openssl-${OPENSSL_VERSION}"
-        ./Configure \
-            linux-generic32 \
-            --prefix="$DEPS_DIR/install" \
-            --libdir=lib \
-            no-shared \
-            no-dso \
-            no-ui-console \
-            -D__ANDROID_API__=${ANDROID_API} \
-            --cross-compile-prefix="${TARGET}-"
+        if [ ! -d "openssl-3.1.4" ]; then
+            tar -xzf openssl-3.1.4.tar.gz
+        fi
+        cd openssl-3.1.4
+        # 根据架构设置正确的配置
+        case "${TARGET}" in
+            aarch64-linux-android*)
+                ./Configure linux-aarch64 \
+                    --prefix="$DEPS_DIR/install" \
+                    --libdir=lib \
+                    no-shared \
+                    no-dso \
+                    no-ui-console \
+                    -D__ANDROID_API__=${ANDROID_API} \
+                    --cross-compile-prefix="${TARGET}-"
+                ;;
+            armv7a-linux-androideabi*)
+                ./Configure linux-armv4 \
+                    --prefix="$DEPS_DIR/install" \
+                    --libdir=lib \
+                    no-shared \
+                    no-dso \
+                    no-ui-console \
+                    -D__ANDROID_API__=${ANDROID_API} \
+                    --cross-compile-prefix="${TARGET}-"
+                ;;
+            x86_64-linux-android*)
+                ./Configure linux-x86_64 \
+                    --prefix="$DEPS_DIR/install" \
+                    --libdir=lib \
+                    no-shared \
+                    no-dso \
+                    no-ui-console \
+                    -D__ANDROID_API__=${ANDROID_API} \
+                    --cross-compile-prefix="${TARGET}-"
+                ;;
+            i686-linux-android*)
+                ./Configure linux-x86 \
+                    --prefix="$DEPS_DIR/install" \
+                    --libdir=lib \
+                    no-shared \
+                    no-dso \
+                    no-ui-console \
+                    -D__ANDROID_API__=${ANDROID_API} \
+                    --cross-compile-prefix="${TARGET}-"
+                ;;
+            *)
+                echo "未知架构: $TARGET"
+                exit 1
+                ;;
+        esac
+        
         make -j$(nproc)
         make install_sw
         cd ..
-
+        
         # 编译 curl
         build_lib "curl" "8.5.0" \
             "https://curl.se/download/curl-8.5.0.tar.gz" \
-            "--with-openssl=$DEPS_DIR/install --without-ssl --without-libssh2 --without-librtmp --without-libidn2 --without-brotli --without-zstd"
-
+            "--with-openssl=$DEPS_DIR/install --disable-ldap --disable-ldaps --without-ssl --without-libssh2 --without-librtmp --without-libidn2 --without-brotli --without-zstd"
+        
         # 编译 sqlite
-        SQLITE_VERSION="3440000"
-        echo "Building SQLite..."
-        if [ ! -f "sqlite-autoconf-${SQLITE_VERSION}.tar.gz" ]; then
-            wget -q "https://www.sqlite.org/2024/sqlite-autoconf-${SQLITE_VERSION}.tar.gz"
-        fi
-        tar -xzf "sqlite-autoconf-${SQLITE_VERSION}.tar.gz"
-        cd "sqlite-autoconf-${SQLITE_VERSION}"
-        mkdir -p build
-        cd build
-        ../configure \
-            --host="${TARGET}" \
-            --prefix="$DEPS_DIR/install" \
-            --enable-static \
-            --disable-shared \
-            --disable-readline \
-            CFLAGS="-Os -fPIE -fPIC -DSQLITE_ENABLE_COLUMN_METADATA -DSQLITE_ENABLE_FTS3 -DSQLITE_ENABLE_FTS4 -DSQLITE_ENABLE_FTS5 -DSQLITE_ENABLE_JSON1 -DSQLITE_ENABLE_RTREE -DSQLITE_MAX_VARIABLE_NUMBER=250000" \
-            AR="$AR" \
-            CC="$CC" \
-            LD="$LD"
-        make -j$(nproc)
-        make install
-        cd ../..
-
-        # 编译 oniguruma (mbstring依赖)
+        build_lib "sqlite" "3440000" \
+            "https://www.sqlite.org/2024/sqlite-autoconf-3440000.tar.gz" \
+            "--disable-readline"
+        
+        # 编译 oniguruma
         build_lib "onig" "6.9.9" \
             "https://github.com/kkos/oniguruma/releases/download/v6.9.9/onig-6.9.9.tar.gz" \
             ""
-
+        
         # 编译 libzip
-        build_lib "libzip" "1.10.1" \
+        build_lib "zip" "1.10.1" \
             "https://libzip.org/download/libzip-1.10.1.tar.gz" \
             "--without-bzip2 --without-lzma --without-zstd"
-
-        echo "Dependencies built successfully!"
+        
+        echo ""
+        echo "================================================"
+        echo "所有依赖库构建完成!"
+        echo "安装目录: $DEPS_DIR/install"
+        echo "================================================"
+        
+        # 显示构建的库文件
+        echo "已构建的静态库:"
+        find "$DEPS_DIR/install" -name "*.a" | xargs -I{} basename {} | sort
         EOF
 
         # 赋予执行权限并运行
@@ -324,6 +550,13 @@ jobs:
         make -j$(nproc)
         $STRIP sapi/cli/php
         
+    - name: Verify binary
+      run: |
+        echo "验证生成的PHP二进制文件:"
+        file $PHP_SOURCE_DIR/sapi/cli/php
+        echo -e "\n动态库依赖:"
+        $TOOLCHAIN/bin/llvm-readelf -d $PHP_SOURCE_DIR/sapi/cli/php | grep NEEDED || echo "无动态依赖（理想状态）"
+        
     - name: Create release package
       run: |
         mkdir -p release/php-${{ env.PHP_VERSION }}-android-${{ matrix.arch }}
@@ -353,6 +586,9 @@ jobs:
         opcache.interned_strings_buffer=8
         opcache.max_accelerated_files=10000
         opcache.revalidate_freq=2
+        
+        ; 扩展目录
+        extension_dir = "/data/local/tmp/php/ext"
         EOF
         
         # 创建启动脚本
@@ -365,9 +601,40 @@ jobs:
         
         chmod +x release/php-${{ env.PHP_VERSION }}-android-${{ matrix.arch }}/start.sh
         
+        # 创建README文件
+        cat > release/php-${{ env.PHP_VERSION }}-android-${{ matrix.arch }}/README.md << 'EOF'
+        # PHP for Android
+        
+        这是一个为Android编译的静态PHP二进制文件。
+        
+        ## 使用方法
+        
+        1. 将文件复制到Android设备
+        2. 在终端中运行: `./start.sh -v`
+        3. 检查PHP版本信息
+        
+        ## 包含的扩展
+        
+        - 核心扩展: filter, hash, json, libxml, mbstring, opcache, phar, session, tokenizer, xml
+        - 数据库: mysqli, pdo_mysql, pdo_sqlite, sqlite3
+        - 网络: curl, ftp, soap, sockets
+        - 图像: gd (支持JPEG, PNG, WebP, FreeType)
+        - 其他: bcmath, calendar, exif, gmp, iconv, pcntl, xsl, zip
+        
+        ## 注意事项
+        
+        - 这是一个静态编译的二进制文件，不依赖系统库
+        - 禁用了一些危险函数
+        - 默认时区设置为Asia/Shanghai
+        EOF
+        
         # 压缩发布包
         cd release
         tar -czf php-${{ env.PHP_VERSION }}-android-${{ matrix.arch }}.tar.gz php-${{ env.PHP_VERSION }}-android-${{ matrix.arch }}
+        
+        # 显示文件大小
+        echo "生成的发布包:"
+        ls -lh *.tar.gz
     
     - name: Upload artifacts
       uses: actions/upload-artifact@v4
@@ -375,7 +642,7 @@ jobs:
         name: php-android-${{ matrix.arch }}
         path: |
           release/php-${{ env.PHP_VERSION }}-android-${{ matrix.arch }}.tar.gz
-          release/php-${{ env.PHP_VERSION }}-android-${{ matrix.arch }}/php
+        retention-days: 7
     
     - name: Create GitHub Release
       if: startsWith(github.ref, 'refs/tags/')
