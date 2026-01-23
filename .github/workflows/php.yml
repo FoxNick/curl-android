@@ -338,7 +338,8 @@ jobs:
             --without-zstd \
             --disable-ldap \
             --disable-ldaps \
-            CFLAGS="-Os -fPIE -fPIC --with-sysroot=$SYSROOT" \
+            --with-sysroot="$SYSROOT" \
+            CFLAGS="-Os -fPIE -fPIC" \
             AR="$AR" \
             CC="$CC" \
             LD="$LD" \
@@ -381,7 +382,7 @@ jobs:
             --enable-static \
             --disable-shared \
             --disable-readline \
-            CFLAGS="-Os -fPIE -fPIC --with-sysroot=$SYSROOT -DSQLITE_ENABLE_COLUMN_METADATA -DSQLITE_ENABLE_FTS3 -DSQLITE_ENABLE_FTS4 -DSQLITE_ENABLE_FTS5 -DSQLITE_ENABLE_JSON1 -DSQLITE_ENABLE_RTREE -DSQLITE_MAX_VARIABLE_NUMBER=250000" \
+            CFLAGS="-Os -fPIE -fPIC -DSQLITE_ENABLE_COLUMN_METADATA -DSQLITE_ENABLE_FTS3 -DSQLITE_ENABLE_FTS4 -DSQLITE_ENABLE_FTS5 -DSQLITE_ENABLE_JSON1 -DSQLITE_ENABLE_RTREE -DSQLITE_MAX_VARIABLE_NUMBER=250000" \
             AR="$AR" \
             CC="$CC" \
             LD="$LD"
