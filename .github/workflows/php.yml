@@ -25,22 +25,22 @@ jobs:
         include:
           - arch: arm64
             target: aarch64-linux-android
-            clang_target: aarch64-none-linux-android21
+            clang_prefix: aarch64-linux-android
             android_abi: arm64-v8a
             openssl_config: linux-aarch64
           - arch: arm
             target: armv7a-linux-androideabi
-            clang_target: armv7a-linux-androideabi21
+            clang_prefix: armv7a-linux-androideabi
             android_abi: armeabi-v7a
             openssl_config: linux-armv4
           - arch: x86_64
             target: x86_64-linux-android
-            clang_target: x86_64-linux-android21
+            clang_prefix: x86_64-linux-android
             android_abi: x86_64
             openssl_config: linux-x86_64
           - arch: x86
             target: i686-linux-android
-            clang_target: i686-linux-android21
+            clang_prefix: i686-linux-android
             android_abi: x86
             openssl_config: linux-x86
     
@@ -108,8 +108,23 @@ jobs:
       run: |
         export TOOLCHAIN="$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64"
         export AR="$TOOLCHAIN/bin/llvm-ar"
-        export CC="$TOOLCHAIN/bin/${{ matrix.clang_target }}-clang"
-        export CXX="$TOOLCHAIN/bin/${{ matrix.clang_target }}-clang++"
+        
+        # 修复：使用正确的编译器命名
+        # 在 NDK r26b 中，编译器命名可能是 aarch64-linux-android21-clang
+        # 而不是 aarch64-none-linux-android21-clang
+        export CC="$TOOLCHAIN/bin/${{ matrix.clang_prefix }}${ANDROID_API}-clang"
+        export CXX="$TOOLCHAIN/bin/${{ matrix.clang_prefix }}${ANDROID_API}-clang++"
+        
+        # 检查编译器是否存在
+        echo "检查编译器: $CC"
+        if [ ! -f "$CC" ]; then
+            echo "警告: 编译器 $CC 不存在，尝试备用命名"
+            # 尝试备用命名
+            export CC="$TOOLCHAIN/bin/${{ matrix.clang_prefix }}-clang"
+            export CXX="$TOOLCHAIN/bin/${{ matrix.clang_prefix }}-clang++"
+            echo "备用编译器: $CC"
+        fi
+        
         export LD="$TOOLCHAIN/bin/ld"
         export RANLIB="$TOOLCHAIN/bin/llvm-ranlib"
         export STRIP="$TOOLCHAIN/bin/llvm-strip"
@@ -119,7 +134,7 @@ jobs:
         
         echo "TOOLCHAIN=$TOOLCHAIN" >> $GITHUB_ENV
         echo "TARGET=${{ matrix.target }}" >> $GITHUB_ENV
-        echo "CLANG_TARGET=${{ matrix.clang_target }}" >> $GITHUB_ENV
+        echo "CLANG_PREFIX=${{ matrix.clang_prefix }}" >> $GITHUB_ENV
         echo "SYSROOT=$TOOLCHAIN/sysroot" >> $GITHUB_ENV
         echo "CFLAGS=$CFLAGS" >> $GITHUB_ENV
         echo "LDFLAGS=$LDFLAGS" >> $GITHUB_ENV
@@ -145,25 +160,34 @@ jobs:
         # 设置环境变量
         export TOOLCHAIN="$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64"
         export AR="$TOOLCHAIN/bin/llvm-ar"
-        export CC="$TOOLCHAIN/bin/${CLANG_TARGET}-clang"
-        export CXX="$TOOLCHAIN/bin/${CLANG_TARGET}-clang++"
+        export CC="$TOOLCHAIN/bin/${CLANG_PREFIX}${ANDROID_API}-clang"
+        export CXX="$TOOLCHAIN/bin/${CLANG_PREFIX}${ANDROID_API}-clang++"
+        
+        # 检查编译器是否存在
+        if [ ! -f "$CC" ]; then
+            echo "编译器 $CC 不存在，尝试备用命名"
+            export CC="$TOOLCHAIN/bin/${CLANG_PREFIX}-clang"
+            export CXX="$TOOLCHAIN/bin/${CLANG_PREFIX}-clang++"
+        fi
+        
         export LD="$TOOLCHAIN/bin/ld"
         export RANLIB="$TOOLCHAIN/bin/llvm-ranlib"
         export STRIP="$TOOLCHAIN/bin/llvm-strip"
         export SYSROOT="$TOOLCHAIN/sysroot"
         export PATH="$TOOLCHAIN/bin:$PATH"
         
-        # 验证编译器是否存在
+        # 验证编译器
         echo "验证编译器..."
         echo "CC: $CC"
-        ls -la "$CC" || echo "编译器不存在，检查路径..."
-        echo "TOOLCHAIN: $TOOLCHAIN"
-        echo "TARGET: $TARGET"
-        echo "CLANG_TARGET: $CLANG_TARGET"
-        
-        # 检查工具链目录结构
-        echo "检查工具链目录:"
-        ls -la "$TOOLCHAIN/bin/" | grep -E "(clang|${CLANG_TARGET})" | head -20 || true
+        if [ -f "$CC" ]; then
+            echo "✓ 编译器存在"
+            $CC --version
+        else
+            echo "✗ 错误: 编译器 $CC 不存在"
+            echo "检查工具链目录:"
+            ls -la "$TOOLCHAIN/bin/" | grep -E "(clang|${CLANG_PREFIX})" | head -20
+            exit 1
+        fi
         
         # 1. 首先构建 openssl
         echo "================================================"
@@ -197,7 +221,7 @@ jobs:
         
         echo "配置 OpenSSL 为 $OPENSSL_CONFIG..."
         
-        # 配置 OpenSSL
+        # 修复 OpenSSL 配置：使用简单的配置
         ./Configure $OPENSSL_CONFIG \
             --prefix="$DEPS_DIR/install" \
             --libdir=lib \
@@ -209,7 +233,21 @@ jobs:
         
         echo "编译 OpenSSL..."
         # 在 make 时传递编译器变量
-        make CC="$CC" AR="$AR" RANLIB="$RANLIB" -j$(nproc) 2>&1 | tail -30
+        if ! make CC="$CC" AR="$AR" RANLIB="$RANLIB" -j$(nproc) 2>&1; then
+            echo "OpenSSL 编译失败，尝试简化构建..."
+            make distclean 2>/dev/null || true
+            
+            # 简化配置
+            ./Configure $OPENSSL_CONFIG \
+                --prefix="$DEPS_DIR/install" \
+                no-shared \
+                -D__ANDROID_API__=${ANDROID_API}
+            
+            if ! make CC="$CC" AR="$AR" RANLIB="$RANLIB" -j$(nproc); then
+                echo "错误: OpenSSL 编译失败"
+                exit 1
+            fi
+        fi
         
         echo "安装 OpenSSL..."
         make install_sw
@@ -447,38 +485,6 @@ jobs:
         cd ../..
         echo "✓ libzip 构建完成"
         
-        # 7. 构建 zlib (如果需要)
-        echo "================================================"
-        echo "构建 zlib 1.2.13"
-        echo "================================================"
-        
-        if [ ! -f "zlib-1.2.13.tar.gz" ]; then
-            echo "下载 zlib..."
-            wget -q https://zlib.net/zlib-1.2.13.tar.gz
-        fi
-        
-        if [ ! -d "zlib-1.2.13" ]; then
-            echo "解压 zlib..."
-            tar -xzf zlib-1.2.13.tar.gz
-        fi
-        
-        cd zlib-1.2.13
-        
-        # 清理
-        make distclean 2>/dev/null || true
-        
-        echo "配置 zlib..."
-        CHOST="$TARGET" ./configure \
-            --prefix="$DEPS_DIR/install" \
-            --static
-        
-        echo "编译 zlib..."
-        make -j$(nproc) CC="$CC" AR="$AR" RANLIB="$RANLIB"
-        make install
-        
-        cd ..
-        echo "✓ zlib 构建完成"
-        
         echo ""
         echo "================================================"
         echo "所有依赖库构建完成!"
@@ -570,14 +576,13 @@ jobs:
           CXX="$CXX" \
           LD="$LD" \
           RANLIB="$RANLIB" \
-          STRIP="$STRIP" \
-          --enable-debug
+          STRIP="$STRIP"
     
     - name: Build PHP
       run: |
         cd $PHP_SOURCE_DIR
         echo "编译 PHP..."
-        make -j$(nproc) 2>&1 | tail -30
+        make -j$(nproc)
         
         echo "清理调试符号..."
         $STRIP sapi/cli/php
