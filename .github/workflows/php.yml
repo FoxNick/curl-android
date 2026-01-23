@@ -1,0 +1,260 @@
+name: Build PHP for Android
+
+于:
+  push:
+    tags: ['v*']
+  workflow_dispatch:  # 允许手动触发
+    inputs:
+      php_version:
+        description: 'PHP version to build'
+        required: true
+        default: '8.3.0'
+
+env:
+  ANDROID_NDK_VERSION: 'r26b'
+  ANDROID_API: 21
+  PHP_VERSION: ${{ github.event.inputs.php_version || '8.3.0' }}
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    
+    strategy:
+      matrix:
+        arch: [arm64, arm, x86_64, x86]
+        include:
+          - arch: arm64
+            target: aarch64-linux-android
+            clang_target: aarch64-none-linux-android21
+          - arch: arm
+            target: armv7a-linux-androideabi
+            clang_target: armv7a-linux-androideabi21
+          - arch: x86_64
+            target: x86_64-linux-android
+            clang_target: x86_64-linux-android21
+          - arch: x86
+            target: i686-linux-android
+            clang_target: i686-linux-android21
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    
+    - name: Setup Android NDK
+      run: |
+        mkdir -p /tmp/android-ndk
+        cd /tmp/android-ndk
+        wget -q https://dl.google.com/android/repository/android-ndk-${{ env.ANDROID_NDK_VERSION }}-linux.zip
+        unzip -q android-ndk-${{ env.ANDROID_NDK_VERSION }}-linux.zip
+        echo "NDK_PATH=/tmp/android-ndk/android-ndk-${{ env.ANDROID_NDK_VERSION }}" >> $GITHUB_ENV
+        echo "$(pwd)/android-ndk-${{ env.ANDROID_NDK_VERSION }}/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_PATH
+    
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          build-essential \
+          autoconf \
+          automake \
+          libtool \
+          pkg-config \
+          bison \
+          re2c \
+          libxml2-dev \
+          libssl-dev \
+          libcurl4-openssl-dev \
+          libsqlite3-dev \
+          libonig-dev \
+          libzip-dev \
+          zlib1g-dev \
+          libpng-dev \
+          libjpeg-dev \
+          libwebp-dev \
+          libfreetype6-dev \
+          libgmp-dev \
+          libedit-dev \
+          libxslt1-dev
+    
+    - name: Download PHP source
+      run: |
+        wget -q https://www.php.net/distributions/php-${{ env.PHP_VERSION }}.tar.gz
+        tar -xzf php-${{ env.PHP_VERSION }}.tar.gz
+        echo "PHP_SOURCE_DIR=$(pwd)/php-${{ env.PHP_VERSION }}" >> $GITHUB_ENV
+    
+    - name: Setup cross-compilation environment
+      run: |
+        export TOOLCHAIN="$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64"
+        export AR="$TOOLCHAIN/bin/llvm-ar"
+        export CC="$TOOLCHAIN/bin/${{ matrix.clang_target }}-clang"
+        export CXX="$TOOLCHAIN/bin/${{ matrix.clang_target }}-clang++"
+        export LD="$TOOLCHAIN/bin/ld"
+        export RANLIB="$TOOLCHAIN/bin/llvm-ranlib"
+        export STRIP="$TOOLCHAIN/bin/llvm-strip"
+        
+        export CFLAGS="-Os -fPIE -fPIC -D__ANDROID_API__=${{ env.ANDROID_API }}"
+        export LDFLAGS="-pie"
+        
+        echo "TOOLCHAIN=$TOOLCHAIN" >> $GITHUB_ENV
+        echo "TARGET=${{ matrix.target }}" >> $GITHUB_ENV
+        echo "SYSROOT=$TOOLCHAIN/sysroot" >> $GITHUB_ENV
+        echo "CFLAGS=$CFLAGS" >> $GITHUB_ENV
+        echo "LDFLAGS=$LDFLAGS" >> $GITHUB_ENV
+        
+        # 导出所有编译器变量
+        echo "AR=$AR" >> $GITHUB_ENV
+        echo "CC=$CC" >> $GITHUB_ENV
+        echo "CXX=$CXX" >> $GITHUB_ENV
+        echo "LD=$LD" >> $GITHUB_ENV
+        echo "RANLIB=$RANLIB" >> $GITHUB_ENV
+        echo "STRIP=$STRIP" >> $GITHUB_ENV
+    
+    - name: Build dependencies (static libraries)
+      run: |
+        cd $PHP_SOURCE_DIR
+        mkdir -p build_deps
+        cd build_deps
+        
+        # 下载和编译依赖库
+        bash ../build-deps.sh
+        
+    - name: Configure PHP
+      run: |
+        cd $PHP_SOURCE_DIR
+        
+        # 清理之前的构建
+        make distclean 2>/dev/null || true
+        ./configure --clean 2>/dev/null || true
+        
+        # 配置PHP
+        ./buildconf --force
+        
+        ./configure \
+          --host=${{ matrix.target }} \
+          --target=${{ matrix.target }} \
+          --prefix=/data/local/tmp/php \
+          --with-sysroot=$SYSROOT \
+          --enable-embed=static \
+          --enable-static \
+          --disable-shared \
+          --disable-all \
+          --disable-cgi \
+          --disable-cli \
+          --without-pear \
+          --enable-filter \
+          --enable-hash \
+          --enable-json \
+          --enable-libxml \
+          --enable-mbstring \
+          --enable-opcache \
+          --enable-phar \
+          --enable-session \
+          --enable-tokenizer \
+          --enable-xml \
+          --enable-xmlreader \
+          --enable-xmlwriter \
+          --with-curl \
+          --with-libedit \
+          --with-openssl \
+          --with-zlib \
+          --with-zip \
+          --with-mysqli=mysqlnd \
+          --with-pdo-mysql=mysqlnd \
+          --with-pdo-sqlite \
+          --with-sqlite3 \
+          --with-iconv \
+          --with-gmp \
+          --with-xsl \
+          --enable-gd \
+          --with-freetype \
+          --with-jpeg \
+          --with-webp \
+          --enable-bcmath \
+          --enable-calendar \
+          --enable-exif \
+          --enable-ftp \
+          --enable-pcntl \
+          --enable-soap \
+          --enable-sockets \
+          --enable-sysvmsg \
+          --enable-sysvsem \
+          --enable-sysvshm \
+          --with-config-file-path=/data/local/tmp/php \
+          --with-config-file-scan-dir=/data/local/tmp/php/conf.d \
+          CFLAGS="$CFLAGS" \
+          LDFLAGS="$LDFLAGS" \
+          AR="$AR" \
+          CC="$CC" \
+          CXX="$CXX" \
+          LD="$LD" \
+          RANLIB="$RANLIB" \
+          STRIP="$STRIP"
+    
+    - name: Build PHP
+      run: |
+        cd $PHP_SOURCE_DIR
+        make -j$(nproc)
+        $STRIP sapi/cli/php
+        
+    - name: Create release package
+      run: |
+        mkdir -p release/php-${{ env.PHP_VERSION }}-android-${{ matrix.arch }}
+        cp $PHP_SOURCE_DIR/sapi/cli/php release/php-${{ env.PHP_VERSION }}-android-${{ matrix.arch }}/php
+        
+        # 创建基本的php.ini文件
+        cat > release/php-${{ env.PHP_VERSION }}-android-${{ matrix.arch }}/php.ini << 'EOF'
+        [PHP]
+        engine = On
+        short_open_tag = Off
+        precision = 14
+        output_buffering = 4096
+        zlib.output_compression = Off
+        implicit_flush = Off
+        unserialize_callback_func =
+        serialize_precision = -1
+        
+        ; 禁用危险函数
+        disable_functions = exec,passthru,shell_exec,system,proc_open,popen
+        
+        [Date]
+        date.timezone = Asia/Shanghai
+        
+        [opcache]
+        opcache.enable=1
+        opcache.memory_consumption=128
+        opcache.interned_strings_buffer=8
+        opcache.max_accelerated_files=10000
+        opcache.revalidate_freq=2
+        EOF
+        
+        # 创建启动脚本
+        cat > release/php-${{ env.PHP_VERSION }}-android-${{ matrix.arch }}/start.sh << 'EOF'
+        #!/system/bin/sh
+        DIR="$(cd "$(dirname "$0")" && pwd)"
+        export PHP_INI_SCAN_DIR="$DIR/conf.d"
+        $DIR/php -c "$DIR/php.ini" "$@"
+        EOF
+        
+        chmod +x release/php-${{ env.PHP_VERSION }}-android-${{ matrix.arch }}/start.sh
+        
+        # 压缩发布包
+        cd release
+        tar -czf php-${{ env.PHP_VERSION }}-android-${{ matrix.arch }}.tar.gz php-${{ env.PHP_VERSION }}-android-${{ matrix.arch }}
+    
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: php-android-${{ matrix.arch }}
+        path: |
+          release/php-${{ env.PHP_VERSION }}-android-${{ matrix.arch }}.tar.gz
+          release/php-${{ env.PHP_VERSION }}-android-${{ matrix.arch }}/php
+    
+    - name: Create GitHub Release
+      if: startsWith(github.ref, 'refs/tags/')
+      uses: softprops/action-gh-release@v1
+      with:
+        文件: |
+          release/php-${{ env.PHP_VERSION }}-android-arm64.tar.gz
+          release/php-${{ env.PHP_VERSION }}-android-arm.tar.gz
+          release/php-${{ env.PHP_VERSION }}-android-x86_64.tar.gz
+          release/php-${{ env.PHP_VERSION }}-android-x86.tar.gz
+        generate_release_notes: true
