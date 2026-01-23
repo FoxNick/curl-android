@@ -110,11 +110,14 @@ jobs:
     
     - name: Build dependencies (static libraries)
       run: |
+        # 复制构建脚本到 PHP 源码目录
+        cp $GITHUB_WORKSPACE/build-deps.sh $PHP_SOURCE_DIR/
+
         cd $PHP_SOURCE_DIR
         mkdir -p build_deps
         cd build_deps
-        
-        # 下载和编译依赖库
+    
+        # 现在可以使用相对路径
         bash ../build-deps.sh
         
     - name: Configure PHP
