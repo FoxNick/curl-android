@@ -29,7 +29,7 @@ android {
         prefab = true
         prefabPublishing = true
     }
-
+    ndkVersion "24.0.8215888"
     externalNativeBuild {
         ndkBuild.path = "src/main/native/Android.mk"
     }
