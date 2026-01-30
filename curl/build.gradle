@@ -14,7 +14,7 @@ android {
                 targets += [ "curl_static", "nghttp2_static", "nghttp3_static", "ngtcp2_crypto_static", "ngtcp2_static" ]
                 arguments += [ "-j${Runtime.runtime.availableProcessors()}" ]
                 if (enableLTO.present) arguments += [ "enableLTO=1" ]
-                abiFilters += [ "x86", "x86_64", "armeabi-v7a", "arm64-v8a", "riscv64" ]
+                abiFilters += [ "x86", "x86_64", "armeabi-v7a", "arm64-v8a" ]
             }
         }
     }
